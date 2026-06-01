@@ -46,7 +46,7 @@ function escapeCsv(value) {
   const page = await browser.newPage();
 
   // Массивы для разделения результатов
-  const killed = [];   // "убит"
+  const killed = [];   // "убит" / "погиб"
   const other = [];    // всё остальное
 
   const headers = [
@@ -151,12 +151,12 @@ function escapeCsv(value) {
 
       // Определяем категорию по полю "Причина выбытия"
       const cause = (data.cause_of_death || '').toLowerCase().trim();
-      const isKilled = cause.includes('убит');
+      const isKilled = cause.includes('убит') || cause.includes('погиб');
 
       // Формируем notes
       let notesParts = [];
 
-      // Если причина не "убит" — добавляем причину в notes
+      // Если причина не "убит"/"погиб" — добавляем причину в notes
       if (!isKilled && data.cause_of_death) {
         notesParts.push(data.cause_of_death);
       }
@@ -189,7 +189,7 @@ function escapeCsv(value) {
 
       if (isKilled) {
         killed.push(data);
-        console.log(`   ✅ убит — добавлен в killed.csv`);
+        console.log(`   ✅ убит/погиб — добавлен в killed.csv`);
       } else {
         other.push(data);
         console.log(`   ⚠️  другое ("${data.cause_of_death || 'не указано'}") — добавлен в other.csv`);
