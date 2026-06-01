@@ -1,0 +1,62 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# Puppeteer-specific
+.local-chromium/
+.puppeteer/
+
+# Локальные данные и кэши
+*.log
+.cache/
+.tmp/
+temp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ОС
+.DS_Store
+Thumbs.db
+
+# Артефакты сборки
+dist/
+build/
+out/
+
+# Переменные окружения
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Результаты тестов
+coverage/
+.nyc_output/
+
+# Пользовательские данные
+data/
+uploads/
+downloads/
+screenshots/
+pdfs/
+
+# Игнорируем любые файлы с этими расширениями
+*.bak
+*.tmp
+
+# Файлы конфигурации для CI/CD
+.github/
+.gitlab-ci.yml
+
+# Личные заметки разработчика
+TODO.md
+notes.txt
