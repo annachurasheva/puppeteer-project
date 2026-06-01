@@ -73,6 +73,26 @@ function escapeCsv(value) {
     'Дата'
   ];
 
+  // Известные заголовки параметров (стандартные)
+  const knownTitles = [
+    'Фамилия',
+    'Имя',
+    'Отчество',
+    'Дата рождения',
+    'Место рождения',
+    'Дата выбытия',
+    'Воинское звание',
+    'Последнее место службы',
+    'Причина выбытия',
+    'Первичное место захоронения',
+    'Номер фонда источника информации',
+    'Номер описи источника информации',
+    'Номер дела источника информации',
+    'Название источника донесения',
+    'Место захоронения',
+    'Место призыва'
+  ];
+
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
     console.log(`\n[${i + 1}/${urls.length}] ${url}`);
@@ -133,14 +153,46 @@ function escapeCsv(value) {
       const cause = (data.cause_of_death || '').toLowerCase().trim();
       const isKilled = cause.includes('убит');
 
+      // Формируем notes
+      let notesParts = [];
+
+      // Если причина не "убит" — добавляем причину в notes
+      if (!isKilled && data.cause_of_death) {
+        notesParts.push(data.cause_of_death);
+      }
+
+      // Если архивные поля пусты — ищем альтернативные параметры на странице
+      const archiveFieldsEmpty = !data.nomer_fonda && !data.nomer_opisi && !data.nomer_dela && !data.document_type;
+      if (archiveFieldsEmpty) {
+        const extraParams = await page.evaluate((knownTitles) => {
+          const extras = [];
+          const elements = document.querySelectorAll('.card_parameter');
+          for (let el of elements) {
+            const titleSpan = el.querySelector('.card_param-title');
+            const valueSpan = el.querySelector('.card_param-result');
+            if (titleSpan && valueSpan) {
+              const title = titleSpan.innerText.trim();
+              if (!knownTitles.includes(title)) {
+                extras.push(`${title}: ${valueSpan.innerText.trim()}`);
+              }
+            }
+          }
+          return extras.join('; ');
+        }, knownTitles);
+
+        if (extraParams) {
+          notesParts.push(extraParams);
+        }
+      }
+
+      data.notes = notesParts.join(' | ');
+
       if (isKilled) {
-        data.notes = '';
         killed.push(data);
         console.log(`   ✅ убит — добавлен в killed.csv`);
       } else {
-        data.notes = data.cause_of_death || 'не указано';
         other.push(data);
-        console.log(`   ⚠️  другое ("${data.cause_of_death}") — добавлен в other.csv`);
+        console.log(`   ⚠️  другое ("${data.cause_of_death || 'не указано'}") — добавлен в other.csv`);
       }
 
       // Пауза перед следующим запросом
@@ -148,7 +200,6 @@ function escapeCsv(value) {
 
     } catch (err) {
       console.error(`   ❌ Ошибка: ${err.message}`);
-      // Пауза даже при ошибке
       await delay(2000);
     }
   }
