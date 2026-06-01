@@ -16,8 +16,24 @@ function escapeCsv(value) {
   return value;
 }
 
+// Функция сохранения CSV
+function saveCsv(filepath, headers, rows) {
+  if (rows.length === 0) return;
+  const csvRows = rows.map(row => {
+    return headers.map(header => {
+      const key = header.toLowerCase();
+      return escapeCsv(row[key] || row[header] || '');
+    }).join(',');
+  });
+  const csvContent = '\uFEFF' + [headers.join(','), ...csvRows].join('\n');
+  fs.writeFileSync(filepath, csvContent, 'utf-8');
+}
+
 (async () => {
   const inputFile = path.join(__dirname, 'data', 'raw', 'input_urls.txt');
+  const processedFile = path.join(__dirname, 'data', 'processed_urls.txt');
+  const killedFile = path.join(__dirname, 'data', 'killed.csv');
+  const otherFile = path.join(__dirname, 'data', 'other.csv');
 
   if (!fs.existsSync(inputFile)) {
     console.error('❌ Файл не найден: data/raw/input_urls.txt');
@@ -25,18 +41,62 @@ function escapeCsv(value) {
   }
 
   // Чтение списка URL
-  const urls = fs.readFileSync(inputFile, 'utf-8')
+  const allUrls = fs.readFileSync(inputFile, 'utf-8')
     .split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0);
 
-  if (urls.length === 0) {
+  if (allUrls.length === 0) {
     console.error('❌ Файл data/raw/input_urls.txt пуст');
     process.exit(1);
   }
 
+  // Загрузка уже обработанных URL (для возобновления после краша)
+  const processedSet = new Set();
+  if (fs.existsSync(processedFile)) {
+    const processed = fs.readFileSync(processedFile, 'utf-8')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+    processed.forEach(url => processedSet.add(url));
+    console.log(`♻️  Найдено ${processedSet.size} уже обработанных URL — пропускаем`);
+  }
+
+  // Загрузка ранее сохранённых результатов (для дозаписи)
+  const killed = [];
+  const other = [];
+
+  function loadExistingCsv(filepath, targetArray) {
+    if (!fs.existsSync(filepath)) return;
+    const content = fs.readFileSync(filepath, 'utf-8').replace(/^\uFEFF/, '');
+    const lines = content.split('\n').filter(line => line.trim().length > 0);
+    if (lines.length <= 1) return; // только заголовок
+    const csvHeaders = lines[0].split(',');
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(',');
+      const row = {};
+      csvHeaders.forEach((h, idx) => {
+        const key = h.trim().toLowerCase();
+        row[key] = (values[idx] || '').trim();
+      });
+      targetArray.push(row);
+    }
+  }
+
+  loadExistingCsv(killedFile, killed);
+  loadExistingCsv(otherFile, other);
+  console.log(`📂 Загружено ранее сохранённых: killed.csv — ${killed.length}, other.csv — ${other.length}`);
+
+  // Фильтрация URL — оставляем только необработанные
+  const urls = allUrls.filter(url => !processedSet.has(url));
+
+  if (urls.length === 0) {
+    console.log('✅ Все URL уже обработаны');
+    process.exit(0);
+  }
+
   console.log(`🚀 Запуск парсера OBD Memorial`);
-  console.log(`📄 Найдено URL: ${urls.length}`);
+  console.log(`📄 Всего URL: ${allUrls.length}, осталось обработать: ${urls.length}`);
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -44,10 +104,6 @@ function escapeCsv(value) {
   });
 
   const page = await browser.newPage();
-
-  // Массивы для разделения результатов
-  const killed = [];   // "убит" / "погиб"
-  const other = [];    // всё остальное
 
   const headers = [
     'Заголовок',
@@ -93,9 +149,12 @@ function escapeCsv(value) {
     'Место призыва'
   ];
 
+  let processedCount = 0;
+
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
-    console.log(`\n[${i + 1}/${urls.length}] ${url}`);
+    const globalIndex = allUrls.indexOf(url) + 1;
+    console.log(`\n[${globalIndex}/${allUrls.length}] ${url}`);
 
     try {
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -195,40 +254,38 @@ function escapeCsv(value) {
         console.log(`   ⚠️  другое ("${data.cause_of_death || 'не указано'}") — добавлен в other.csv`);
       }
 
+      // Отмечаем URL как обработанный
+      fs.appendFileSync(processedFile, url + '\n', 'utf-8');
+      processedCount++;
+
+      // Промежуточное сохранение каждые 50 записей
+      if (processedCount % 50 === 0) {
+        console.log(`   💾 Промежуточное сохранение (${processedCount} обработано)...`);
+        saveCsv(killedFile, headers, killed);
+        saveCsv(otherFile, headers, other);
+      }
+
       // Пауза перед следующим запросом
       await delay(2000);
 
     } catch (err) {
       console.error(`   ❌ Ошибка: ${err.message}`);
+      // Сохраняем промежуточные результаты при ошибке
+      console.log(`   💾 Сохранение промежуточных результатов...`);
+      saveCsv(killedFile, headers, killed);
+      saveCsv(otherFile, headers, other);
       await delay(2000);
     }
   }
 
   await browser.close();
 
-  // Функция сохранения CSV
-  function saveCsv(filename, rows) {
-    if (rows.length === 0) {
-      console.log(`   ⏭  ${filename} — нет записей, файл не создан`);
-      return;
-    }
+  // Финальное сохранение
+  console.log('\n📊 Финальное сохранение результатов...');
+  saveCsv(killedFile, headers, killed);
+  saveCsv(otherFile, headers, other);
 
-    const csvRows = rows.map(row => {
-      return headers.map(header => {
-        const key = header.toLowerCase();
-        return escapeCsv(row[key] || row[header] || '');
-      }).join(',');
-    });
-
-    const csvContent = '\uFEFF' + [headers.join(','), ...csvRows].join('\n');
-    const filepath = path.join(__dirname, 'data', filename);
-    fs.writeFileSync(filepath, csvContent, 'utf-8');
-    console.log(`   💾 ${filename} — ${rows.length} записей`);
-  }
-
-  console.log('\n📊 Сохранение результатов...');
-  saveCsv('killed.csv', killed);
-  saveCsv('other.csv', other);
-
+  console.log(`   💾 killed.csv — ${killed.length} записей`);
+  console.log(`   💾 other.csv — ${other.length} записей`);
   console.log('\n✅ Готово!');
 })();
