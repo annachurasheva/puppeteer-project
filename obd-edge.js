@@ -12,11 +12,25 @@
  *         Откуда перезахоронен, ... без «Причины выбытия»)
  *  - Классификация «убит/погиб» — свежая редакция (см. classify()).
  *
- * ЗАПУСК:
- *   pwsh scripts/RunEdgeOBD.ps1          # поднять Edge c CDP на 9226
- *   node obd-edge.js                     # полный прогон
- *   node obd-edge.js --dry-run           # только показать, что будет обработано
- *   node obd-edge.js --port 9227         # другой порт при необходимости
+ * ВХОД:
+ *   Файлы со списками URL лежат в data/raw/*.txt (ЛЮБОЕ имя, без жёсткой привязки).
+ *   node obd-edge.js                          # обработать ВСЕ *.txt из data/raw/
+ *   node obd-edge.js --input=имя.txt          # обработать только указанный файл
+ *   node obd-edge.js --dry-run                # только показать, ничего не писать
+ *   node obd-edge.js --port=9227              # другой порт при необходимости
+ *
+ * ВЫХОД (для каждого входного файла <имя>):
+ *   data/processed/<имя>/
+ *     <имя>__parser_mem2026.csv     — убит/погиб
+ *     <имя>__other_mem2026_.csv     — остальные причины
+ *     <имя>__session.log            — полный лог прогона
+ *     <имя>__errors.log             — только ошибки
+ *     <имя>__processed.txt          — журнал обработанных URL (возобновление)
+ *
+ * СУММА (глобальный накопитель по всем файлам):
+ *   data/summary/processed_ids.txt  — дописывается id (хвост адреса) после КАЖДОЙ
+ *                                     успешно обработанной карточки. Используется
+ *                                     скриптом scripts/check-input.js для контроля дублей.
  */
 
 const puppeteer = require('puppeteer');
@@ -29,10 +43,23 @@ const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
 const portArg = args.find(a => a.startsWith('--port='));
 const PORT = portArg ? parseInt(portArg.split('=')[1], 10) : DEFAULT_PORT;
+const inputArg = args.find(a => a.startsWith('--input='));
+const INPUT_FILE = inputArg ? inputArg.split('=')[1] : null;
 
-// Задержка для щадящей нагрузки на портал
+// ---------- Задержки (рандомизация, чтобы не походить на бота) ----------
+// Можно раздвинуть — парсер работает в фоне.
+const MIN_AFTER_LOAD = 3000;   // после загрузки страницы (минимум, мс)
+const MAX_AFTER_LOAD = 6000;   // после загрузки страницы (максимум, мс)
+const MIN_BETWEEN = 3000;      // между карточками (минимум, мс)
+const MAX_BETWEEN = 15000;     // между карточками (максимум, мс) — до 15 сек
+
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function randomDelay(min, max) {
+  const value = Math.floor(min + Math.random() * (max - min + 1));
+  return delay(value);
 }
 
 // Экранирование значения для CSV
@@ -57,91 +84,118 @@ function saveCsv(filepath, headers, rows) {
   fs.writeFileSync(filepath, csvContent, 'utf-8');
 }
 
-(async () => {
-  const inputFile = path.join(__dirname, 'data', 'raw', 'input_urls.txt');
-  const processedFile = path.join(__dirname, 'data', 'processed_urls.txt');
-  const logsDir = path.join(__dirname, 'data', 'processed', 'logs');
+// Извлечение id из URL (хвост адреса): https://obd-memorial.ru/html/info.htm?id=551267195 -> 551267195
+function extractIdFromUrl(url) {
+  const match = url.match(/id=(\d+)/);
+  return match ? match[1] : '';
+}
 
-  fs.mkdirSync(logsDir, { recursive: true });
+// Чтение файла со списком URL: пропускаем пустые строки и комментарии (#)
+function readUrlList(filepath) {
+  if (!fs.existsSync(filepath)) return [];
+  return fs.readFileSync(filepath, 'utf-8')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !line.startsWith('#'));
+}
+
+// Загрузка множества из файла (по одной записи на строку)
+function loadSet(filepath) {
+  const set = new Set();
+  if (fs.existsSync(filepath)) {
+    fs.readFileSync(filepath, 'utf-8')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .forEach(line => set.add(line));
+  }
+  return set;
+}
+
+// ---------- Обработка одного входного файла ----------
+async function processInputFile(browser, inputFile) {
+  const baseName = path.basename(inputFile, path.extname(inputFile));
+  const outDir = path.join(__dirname, 'data', 'processed', baseName);
+  const summaryFile = path.join(__dirname, 'data', 'summary', 'processed_ids.txt');
+
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(path.dirname(summaryFile), { recursive: true });
 
   const today = new Date().toISOString().split('T')[0];
-  const killedFile = path.join(logsDir, `${today}__parser_mem2026.csv`);
-  const otherFile = path.join(logsDir, `${today}__other_mem2026_.csv`);
-  const sessionLogFile = path.join(logsDir, `${today}__session.log`);
-  const errorsLogFile = path.join(logsDir, `${today}__errors.log`);
+  const killedFile = path.join(outDir, `${baseName}__parser_mem2026.csv`);
+  const otherFile = path.join(outDir, `${baseName}__other_mem2026_.csv`);
+  const sessionLogFile = path.join(outDir, `${baseName}__session.log`);
+  const errorsLogFile = path.join(outDir, `${baseName}__errors.log`);
+  const processedFile = path.join(outDir, `${baseName}__processed.txt`);
 
   function log(msg) {
     console.log(msg);
-    fs.appendFileSync(sessionLogFile, msg + '\n', 'utf-8');
+    if (!isDryRun) fs.appendFileSync(sessionLogFile, msg + '\n', 'utf-8');
   }
 
   function logError(msg) {
     console.error(msg);
-    fs.appendFileSync(sessionLogFile, '[ERROR] ' + msg + '\n', 'utf-8');
-    fs.appendFileSync(errorsLogFile, msg + '\n', 'utf-8');
+    if (!isDryRun) {
+      fs.appendFileSync(sessionLogFile, '[ERROR] ' + msg + '\n', 'utf-8');
+      fs.appendFileSync(errorsLogFile, msg + '\n', 'utf-8');
+    }
   }
 
+  log(`\n===== Файл: ${baseName} =====`);
   if (isDryRun) {
     log(`🔍 DRY-RUN: подключение к Edge CDP localhost:${PORT}...`);
-  } else {
-    log(`🚀 Запуск парсера OBD Memorial через Edge CDP localhost:${PORT}`);
   }
 
-  if (!fs.existsSync(inputFile)) {
-    logError('❌ Файл не найден: data/raw/input_urls.txt');
-    process.exit(1);
-  }
-
-  // Чтение списка URL: пропускаем пустые строки и комментарии (#)
-  const allUrls = fs.readFileSync(inputFile, 'utf-8')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0 && !line.startsWith('#'));
-
+  const allUrls = readUrlList(inputFile);
   if (allUrls.length === 0) {
-    logError('❌ Файл data/raw/input_urls.txt пуст (только комментарии). Добавьте адреса.');
-    process.exit(1);
+    logError(`❌ В файле ${baseName} нет ни одного URL (только комментарии). Пропускаю.`);
+    return;
   }
 
-  // Возобновление после краша
-  const processedSet = new Set();
-  if (fs.existsSync(processedFile)) {
-    const processed = fs.readFileSync(processedFile, 'utf-8')
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0);
-    processed.forEach(url => processedSet.add(url));
-    log(`♻️  Найдено ${processedSet.size} уже обработанных URL — пропускаем`);
+  // --- Контроль дублей внутри файла ---
+  const urlCount = new Map();
+  for (const url of allUrls) {
+    urlCount.set(url, (urlCount.get(url) || 0) + 1);
+  }
+  const internalDuplicates = [...urlCount.entries()].filter(([, n]) => n > 1);
+  if (internalDuplicates.length > 0) {
+    log(`⚠️  Внутренние дубли в файле (${internalDuplicates.length} адресов повторяются):`);
+    for (const [url, n] of internalDuplicates) {
+      log(`   ×${n}  ${url}`);
+    }
   }
 
-  const urls = allUrls.filter(url => !processedSet.has(url));
-  if (urls.length === 0) {
-    log('✅ Все URL уже обработаны');
-    process.exit(0);
+  // --- Журнал этого файла + глобальная сумма ---
+  const processedSet = loadSet(processedFile);
+  const summaryIds = loadSet(summaryFile);
+
+  if (processedSet.size > 0) {
+    log(`♻️  В журнале файла: ${processedSet.size} уже обработанных URL — пропускаем`);
   }
 
-  log(`📄 Всего URL: ${allUrls.length}, осталось обработать: ${urls.length}`);
+  // Отбираем URL, которые ещё не обрабатывались:
+  // 1) нет в журнале файла (полный URL)
+  // 2) id нет в глобальной сумме
+  const urlsToProcess = allUrls.filter((url) => {
+    if (processedSet.has(url)) return false;
+    const id = extractIdFromUrl(url);
+    if (id && summaryIds.has(id)) return false;
+    return true;
+  });
+
+  const skippedBySummary = allUrls.length - urlsToProcess.length - processedSet.size;
+  if (skippedBySummary > 0) {
+    log(`♻️  Из них ${skippedBySummary} уже есть в глобальной сумме (data/summary/processed_ids.txt) — пропускаем`);
+  }
+
+  if (urlsToProcess.length === 0) {
+    log('✅ Все URL уже обработаны (журнал файла + сумма).');
+    return;
+  }
+
+  log(`📄 Всего URL: ${allUrls.length}, осталось обработать: ${urlsToProcess.length}`);
   log(`📁 Результаты: ${killedFile}`);
   log(`📁 Результаты: ${otherFile}`);
-  log(`📁 Лог сессии: ${sessionLogFile}`);
-  log(`📁 Лог ошибок: ${errorsLogFile}`);
-
-  // ---------- Подключение к Edge по CDP ----------
-  let browser;
-  try {
-    browser = await puppeteer.connect({
-      browserURL: `http://127.0.0.1:${PORT}`,
-      defaultViewport: null,
-    });
-    log(`🔗 Подключено к Edge CDP localhost:${PORT}`);
-  } catch (e) {
-    logError(`❌ Не удалось подключиться к Edge CDP localhost:${PORT}.`);
-    logError(`   Сначала запустите: pwsh scripts/RunEdgeOBD.ps1`);
-    logError(`   Ошибка: ${e.message}`);
-    process.exit(1);
-  }
-
-  const page = await browser.newPage();
 
   const headers = [
     'Заголовок',
@@ -210,18 +264,20 @@ function saveCsv(filepath, headers, rows) {
     return 'other';
   }
 
+  const page = await browser.newPage();
+
   const killed = [];
   const other = [];
   let processedCount = 0;
 
-  for (let i = 0; i < urls.length; i++) {
-    const url = urls[i];
-    const globalIndex = allUrls.indexOf(url) + 1;
-    log(`\n[${globalIndex}/${allUrls.length}] ${url}`);
+  for (let i = 0; i < urlsToProcess.length; i++) {
+    const url = urlsToProcess[i];
+    const globalIndex = i + 1;
+    log(`\n[${globalIndex}/${urlsToProcess.length}] ${url}`);
 
     try {
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      await delay(3000); // пауза для полной отрисовки DOM
+      await randomDelay(MIN_AFTER_LOAD, MAX_AFTER_LOAD); // пауза для полной отрисовки DOM
 
       // Сбор данных со страницы (аналог F12-скрипта, но универсальный под оба типа карточек)
       const data = await page.evaluate((knownTitles) => {
@@ -330,15 +386,19 @@ function saveCsv(filepath, headers, rows) {
 
       if (isKilled) {
         killed.push(data);
-        log(`   ✅ убит/погиб — добавлен в ${today}__parser_mem2026.csv`);
+        log(`   ✅ убит/погиб — добавлен в ${baseName}__parser_mem2026.csv`);
       } else {
         other.push(data);
-        log(`   ⚠️  другое ("${data.cause_of_death || 'не указано'}") — добавлен в ${today}__other_mem2026_.csv`);
+        log(`   ⚠️  другое ("${data.cause_of_death || 'не указано'}") — добавлен в ${baseName}__other_mem2026_.csv`);
       }
 
-      // Отмечаем URL как обработанный
+      // Отмечаем как обработанное: полный URL в журнал файла, id в глобальную сумму
       if (!isDryRun) {
         fs.appendFileSync(processedFile, url + '\n', 'utf-8');
+        const id = extractIdFromUrl(url) || data.document_id || '';
+        if (id) {
+          fs.appendFileSync(summaryFile, id + '\n', 'utf-8');
+        }
       }
       processedCount++;
 
@@ -349,7 +409,7 @@ function saveCsv(filepath, headers, rows) {
         saveCsv(otherFile, headers, other);
       }
 
-      await delay(2000);
+      await randomDelay(MIN_BETWEEN, MAX_BETWEEN);
 
     } catch (err) {
       logError(`   ❌ Ошибка: ${err.message}`);
@@ -358,24 +418,79 @@ function saveCsv(filepath, headers, rows) {
         saveCsv(killedFile, headers, killed);
         saveCsv(otherFile, headers, other);
       }
-      await delay(2000);
+      await randomDelay(MIN_BETWEEN, MAX_BETWEEN);
     }
   }
 
-  await browser.disconnect();
+  await page.close();
 
   if (!isDryRun) {
     log('\n📊 Финальное сохранение результатов...');
     saveCsv(killedFile, headers, killed);
     saveCsv(otherFile, headers, other);
 
-    log(`   💾 ${today}__parser_mem2026.csv — ${killed.length} записей`);
-    log(`   💾 ${today}__other_mem2026_.csv — ${other.length} записей`);
+    log(`   💾 ${baseName}__parser_mem2026.csv — ${killed.length} записей`);
+    log(`   💾 ${baseName}__other_mem2026_.csv — ${other.length} записей`);
   } else {
-    log(`\n📊 DRY-RUN завершён. Обработано (смоделировано): ${processedCount}`);
+    log(`\n📊 DRY-RUN (${baseName}) завершён. Обработано (смоделировано): ${processedCount}`);
     log(`   killed: ${killed.length}, other: ${other.length}`);
-    log('   Файлы НЕ записаны, журнал processed_urls НЕ изменён.');
+    log('   Файлы НЕ записаны, журналы/сумма НЕ изменены.');
+  }
+}
+
+// ---------- Главная функция ----------
+(async () => {
+  const rawDir = path.join(__dirname, 'data', 'raw');
+
+  // Определяем список входных файлов
+  let inputFiles = [];
+  if (INPUT_FILE) {
+    const p = path.join(rawDir, INPUT_FILE);
+    if (!fs.existsSync(p)) {
+      console.error(`❌ Файл не найден: data/raw/${INPUT_FILE}`);
+      process.exit(1);
+    }
+    inputFiles = [p];
+  } else {
+    if (!fs.existsSync(rawDir)) {
+      console.error(`❌ Папка не найдена: data/raw/`);
+      process.exit(1);
+    }
+    inputFiles = fs.readdirSync(rawDir)
+      .filter(f => f.endsWith('.txt'))
+      .map(f => path.join(rawDir, f))
+      .sort();
   }
 
-  log('\n✅ Готово!');
+  if (inputFiles.length === 0) {
+    console.error('❌ В data/raw/ нет ни одного .txt файла. Положите список URL.');
+    process.exit(1);
+  }
+
+  console.log(`📂 Входных файлов: ${inputFiles.length}`);
+  for (const f of inputFiles) {
+    console.log(`   - ${path.basename(f)}`);
+  }
+
+  // Подключение к Edge по CDP
+  let browser;
+  try {
+    browser = await puppeteer.connect({
+      browserURL: `http://127.0.0.1:${PORT}`,
+      defaultViewport: null,
+    });
+    console.log(`🔗 Подключено к Edge CDP localhost:${PORT}`);
+  } catch (e) {
+    console.error(`❌ Не удалось подключиться к Edge CDP localhost:${PORT}.`);
+    console.error(`   Сначала запустите: pwsh scripts/RunEdgeOBD.ps1`);
+    console.error(`   Ошибка: ${e.message}`);
+    process.exit(1);
+  }
+
+  for (const file of inputFiles) {
+    await processInputFile(browser, file);
+  }
+
+  await browser.disconnect();
+  console.log('\n✅ Готово!');
 })();
