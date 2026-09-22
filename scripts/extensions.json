@@ -1,0 +1,8 @@
+{
+  // TASK-0005 · TASK-0100 (m3) — рекомендуемые расширения (только реально нужные).
+  "recommendations": [
+    "ms-vscode.powershell",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode"
+  ]
+}

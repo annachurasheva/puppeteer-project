@@ -1,0 +1,45 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach Edge CDP 9222",
+      "type": "msedge",
+      "request": "attach",
+      "port": 9222,
+      "urlFilter": "https://ok.ru/*",
+      "webRoot": "${workspaceFolder}/dist"
+    },
+    {
+      "name": "Attach Edge CDP 9223",
+      "type": "msedge",
+      "request": "attach",
+      "port": 9223,
+      "urlFilter": "https://ok.ru/*",
+      "webRoot": "${workspaceFolder}/dist"
+    },
+    {
+      "name": "Attach Edge CDP 9224",
+      "type": "msedge",
+      "request": "attach",
+      "port": 9224,
+      "urlFilter": "https://ok.ru/*",
+      "webRoot": "${workspaceFolder}/dist"
+    },
+    {
+      "name": "Attach Edge CDP 9225",
+      "type": "msedge",
+      "request": "attach",
+      "port": 9225,
+      "urlFilter": "https://ok.ru/*",
+      "webRoot": "${workspaceFolder}/dist"
+    },
+    {
+      "name": "Attach Edge CDP 9226",
+      "type": "msedge",
+      "request": "attach",
+      "port": 9226,
+      "urlFilter": "https://ok.ru/*",
+      "webRoot": "${workspaceFolder}/dist"
+    },    
+  ]
+}
