@@ -1,0 +1,23 @@
+# .gitattributes — нормализация строк и бинарники.
+
+
+# Текст — единый LF в репозитории.
+* text=auto eol=lf
+
+# Явно текстовые.
+*.md   text
+*.js   text
+*.ts   text
+*.tsx  text
+*.css  text
+*.html text
+*.json text
+*.jsonc text
+*.svg  text
+*.ps1  text eol=crlf
+
+# Явно бинарные (не диффить, не нормализовать).
+*.png  binary
+*.ico  binary
+*.jpg  binary
+
